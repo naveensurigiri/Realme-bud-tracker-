@@ -22,11 +22,16 @@ class MainActivity : FlutterActivity() {
     private var channel: MethodChannel? = null
     private var socket: BluetoothSocket? = null
 
-    private fun hasPermission(): Boolean =
-        Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
-            checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
+    private val perms = arrayOf(
+            Manifest.permission.BLUETOOTH_CONNECT,
+            Manifest.permission.BLUETOOTH_SCAN,
+        )
 
-    private fun adapter(): BluetoothAdapter? =
+        private fun hasAllPermissions(): Boolean =
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
+                perms.all { check_selfPermission(it) == PackageManager.PERMISSION_GRANTED }
+
+        private fun adapter(): BluetoothAdapter? =
         (getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -34,8 +39,8 @@ class MainActivity : FlutterActivity() {
         val ch = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "realme_buds/rfcomm")
         channel = ch
         ch.setMethodCallHandler { call, result ->
-            if (!hasPermission()) {
-                requestPermissions(arrayOf(Manifest.permission.BLUETOOTH_CONNECT), 1)
+            if (!hasAllPermissions()) {
+                requestPermissions(perms, 1)
                 result.error("permission", "Allow the Nearby devices permission, then tap again.", null)
                 return@setMethodCallHandler
             }

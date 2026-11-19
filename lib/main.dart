@@ -251,7 +251,13 @@ class DashboardPage extends StatelessWidget {
                           fontWeight: FontWeight.w500,
                           color: Color(0xFFEEEDFE),
                           fontFeatures: [FontFeature.tabularFigures()])),
-                  Text(c.message,
+                  Text(c.state == LinkState.connected
+                      ? 'Connected'
+                      : c.state == LinkState.connecting
+                          ? 'Connecting…'
+                          : c.state == LinkState.retrying
+                              ? 'Retrying…'
+                              : c.message,
                       textAlign: TextAlign.center,
                       style: const TextStyle(fontSize: 13, color: Color(0xFFEEEDFE))),
                 ],
@@ -304,6 +310,7 @@ class DashboardPage extends StatelessWidget {
             const SizedBox(height: 4),
             InfoCard(title: 'Status', titleColor: const Color(0xFF3C3489), rows: [
               ('Device', c.deviceLabel),
+              ('Permission', c.permissionLabel),
               ('Wearing', 'Not available yet'),
             ]),
             const SizedBox(height: 12),
@@ -319,16 +326,18 @@ class DashboardPage extends StatelessWidget {
                         overflow: TextOverflow.ellipsis),
                   ),
               ],
-              onChanged: connected || busy ? null : c.selectDevice,
+              onChanged: (c.permission == PermState.denied || connected || busy)
+                  ? null
+                  : c.selectDevice,
             ),
             Row(
               children: [
                 Expanded(
                   child: FilledButton(
-                    onPressed: c.address == null || busy
+                    onPressed: c.address == null || busy || c.permission == PermState.denied
                         ? null
                         : (connected ? c.disconnect : c.connect),
-                    child: Text(connected ? 'Disconnect' : (busy ? 'Connecting...' : 'Connect')),
+                    child: Text(connected ? 'Disconnect' : (busy ? 'Connecting…' : 'Connect')),
                   ),
                 ),
                 const SizedBox(width: 8),
@@ -359,7 +368,14 @@ class BudsPage extends StatelessWidget {
             rows: [
               ('Name', controller.deviceLabel),
               ('Address', controller.address ?? '--'),
-              ('Link', controller.message),
+              ('Link', controller.state == LinkState.connected
+                  ? 'Connected'
+                  : controller.state == LinkState.connecting
+                      ? 'Connecting…'
+                      : controller.state == LinkState.retrying
+                          ? 'Retrying…'
+                          : controller.message),
+              ('Permission', controller.permissionLabel),
               ('Firmware, serial', 'Not read yet'),
             ],
           ),

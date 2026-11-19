@@ -12,6 +12,8 @@ import 'rfcomm.dart';
 
 enum LinkState { idle, connecting, connected, retrying }
 
+enum PermState { unknown, granted, denied, retrying }
+
 class ModeStat {
   int count = 0;
   int seconds = 0;
@@ -24,6 +26,7 @@ class BudsController extends ChangeNotifier {
 
   LinkState state = LinkState.idle;
   String message = 'Not connected';
+  PermState permission = PermState.unknown;
   List<BondedDevice> bonded = [];
   String? address;
   String notes = '';
@@ -68,8 +71,15 @@ class BudsController extends ChangeNotifier {
   Future<void> loadBonded() async {
     try {
       bonded = await _link.bonded();
+      permission = PermState.granted;
     } catch (e) {
-      message = _errorText(e);
+      if (e is PlatformException && e.code == 'permission') {
+        permission = PermState.denied;
+        message = 'Bluetooth permission needed';
+      } else {
+        permission = PermState.denied;
+        message = _errorText(e);
+      }
     }
     notifyListeners();
   }
@@ -116,15 +126,17 @@ class BudsController extends ChangeNotifier {
     try {
       await _link.connect(a);
       _attempt = 0;
+      permission = PermState.granted;
       state = LinkState.connected;
       message = 'Connected';
       connectedAt = DateTime.now();
       _startPolling();
     } catch (e) {
-      if (e is PlatformException && e.code == 'permission') {
+      if (e is PlatformException && (e.code == 'permission' || _isPermError(e))) {
         _want = false;
+        permission = PermState.denied;
         state = LinkState.idle;
-        message = _errorText(e);
+        message = 'Bluetooth permission needed — grant Nearby devices, then tap Connect';
       } else {
         _scheduleRetry(_errorText(e));
       }
@@ -147,6 +159,24 @@ class BudsController extends ChangeNotifier {
   }
 
   String _errorText(Object e) => e is PlatformException ? (e.message ?? e.code) : '$e';
+
+  bool _isPermError(PlatformException e) {
+    final m = (e.message ?? '').toLowerCase();
+    return m.contains('permission') || m.contains('bluetooth_scan') || m.contains('bluetooth_connect');
+  }
+
+  String get permissionLabel {
+    switch (permission) {
+      case PermState.granted:
+        return 'Granted';
+      case PermState.denied:
+        return 'Denied — tap Connect to request';
+      case PermState.retrying:
+        return 'Requesting…';
+      case PermState.unknown:
+        return 'Unknown';
+    }
+  }
 
   void _scheduleRetry(String reason) {
     const delays = [2, 4, 8, 16, 30];
