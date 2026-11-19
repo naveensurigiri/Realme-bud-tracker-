@@ -26,11 +26,20 @@ jobs:
           cp -r _gen/android .
           rm -rf _gen
 
+      - name: Install Bluetooth bridge
+        run: |
+          mkdir -p android/app/src/main/kotlin/com/naveen/realme_buds_tracker
+          cp android_overrides/MainActivity.kt android/app/src/main/kotlin/com/naveen/realme_buds_tracker/MainActivity.kt
+
       - name: Add Bluetooth permissions
         run: python3 scripts/add_permissions.py android/app/src/main/AndroidManifest.xml
 
       - name: Get dependencies
         run: flutter pub get
+
+      - name: Run tests
+        run: flutter test
+        continue-on-error: true
 
       - name: Build release APK
         run: flutter build apk --release

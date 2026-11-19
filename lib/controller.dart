@@ -1,0 +1,245 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:math';
+import 'dart:typed_data';
+
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import 'protocol.dart';
+import 'rfcomm.dart';
+
+enum LinkState { idle, connecting, connected, retrying }
+
+class ModeStat {
+  int count = 0;
+  int seconds = 0;
+}
+
+class BudsController extends ChangeNotifier {
+  final Rfcomm _link = Rfcomm();
+  final FrameReader _reader = FrameReader();
+  SharedPreferences? _prefs;
+
+  LinkState state = LinkState.idle;
+  String message = 'Not connected';
+  List<BondedDevice> bonded = [];
+  String? address;
+  String notes = '';
+  Battery battery = const Battery();
+  int? modeCode;
+  DateTime? connectedAt;
+  final Map<int, ModeStat> stats = {
+    modeAnc: ModeStat(),
+    modeTransparency: ModeStat(),
+    modeNormal: ModeStat(),
+  };
+
+  DateTime? _modeSince;
+  Timer? _poll;
+  Timer? _retry;
+  int _seq = 0;
+  int _attempt = 0;
+  bool _want = false;
+
+  Future<void> init() async {
+    _prefs = await SharedPreferences.getInstance();
+    address = _prefs!.getString('address');
+    notes = _prefs!.getString('notes') ?? '';
+    final raw = _prefs!.getString('stats');
+    if (raw != null) {
+      try {
+        final m = jsonDecode(raw) as Map<String, dynamic>;
+        for (final e in m.entries) {
+          final s = stats[int.parse(e.key)];
+          if (s != null) {
+            s.count = (e.value as List)[0] as int;
+            s.seconds = (e.value as List)[1] as int;
+          }
+        }
+      } catch (_) {}
+    }
+    _link.listen(_onData, _onClosed);
+    await loadBonded();
+    if (address != null) unawaited(connect());
+  }
+
+  Future<void> loadBonded() async {
+    try {
+      bonded = await _link.bonded();
+    } catch (e) {
+      message = _errorText(e);
+    }
+    notifyListeners();
+  }
+
+  void selectDevice(String? a) {
+    address = a;
+    if (a != null) _prefs?.setString('address', a);
+    notifyListeners();
+  }
+
+  void setNotes(String v) {
+    notes = v;
+    _prefs?.setString('notes', v);
+  }
+
+  String get deviceLabel {
+    for (final d in bonded) {
+      if (d.address == address) return d.name.isEmpty ? d.address : d.name;
+    }
+    return address ?? 'None selected';
+  }
+
+  int get connectedSeconds =>
+      connectedAt == null ? 0 : DateTime.now().difference(connectedAt!).inSeconds;
+
+  int secondsIn(int mode) {
+    final s = stats[mode];
+    if (s == null) return 0;
+    var t = s.seconds;
+    if (mode == modeCode && _modeSince != null) {
+      t += DateTime.now().difference(_modeSince!).inSeconds;
+    }
+    return t;
+  }
+
+  Future<void> connect() async {
+    final a = address;
+    if (a == null) return;
+    _want = true;
+    _retry?.cancel();
+    state = LinkState.connecting;
+    message = 'Connecting...';
+    notifyListeners();
+    try {
+      await _link.connect(a);
+      _attempt = 0;
+      state = LinkState.connected;
+      message = 'Connected';
+      connectedAt = DateTime.now();
+      _startPolling();
+    } catch (e) {
+      if (e is PlatformException && e.code == 'permission') {
+        _want = false;
+        state = LinkState.idle;
+        message = _errorText(e);
+      } else {
+        _scheduleRetry(_errorText(e));
+      }
+    }
+    notifyListeners();
+  }
+
+  Future<void> disconnect() async {
+    _want = false;
+    _retry?.cancel();
+    _stopPolling();
+    _endMode();
+    try {
+      await _link.disconnect();
+    } catch (_) {}
+    state = LinkState.idle;
+    message = 'Disconnected';
+    connectedAt = null;
+    notifyListeners();
+  }
+
+  String _errorText(Object e) => e is PlatformException ? (e.message ?? e.code) : '$e';
+
+  void _scheduleRetry(String reason) {
+    const delays = [2, 4, 8, 16, 30];
+    final wait = delays[min(_attempt, delays.length - 1)];
+    _attempt++;
+    state = LinkState.retrying;
+    message = '$reason. Retrying in ${wait}s';
+    _retry?.cancel();
+    _retry = Timer(Duration(seconds: wait), connect);
+  }
+
+  int _next() {
+    _seq = (_seq + 1) & 0xFF;
+    return _seq;
+  }
+
+  void _send(Uint8List b) {
+    unawaited(_link.send(b).catchError((Object _) {}));
+  }
+
+  void _startPolling() {
+    _stopPolling();
+    _send(buildFrame(cmdInfo, _next(), const []));
+    _query();
+    _poll = Timer.periodic(const Duration(seconds: 5), (_) => _query());
+  }
+
+  void _stopPolling() {
+    _poll?.cancel();
+    _poll = null;
+  }
+
+  // Read-only queries, the same two that Realme Link sends.
+  void _query() {
+    _send(buildFrame(cmdBatteryQuery, _next(), const []));
+    _send(buildFrame(cmdModeQuery, _next(), const [1, 1]));
+  }
+
+  void _onData(Uint8List data) {
+    for (final f in _reader.add(data)) {
+      final b = parseBattery(f);
+      if (b != null) battery = b;
+      final m = parseMode(f);
+      if (m != null) _setMode(m);
+    }
+    notifyListeners();
+  }
+
+  void _onClosed() {
+    if (state != LinkState.connected) return;
+    _stopPolling();
+    _endMode();
+    connectedAt = null;
+    if (_want) {
+      _scheduleRetry('Connection lost');
+    } else {
+      state = LinkState.idle;
+      message = 'Disconnected';
+    }
+    notifyListeners();
+  }
+
+  void _closeSegment() {
+    final since = _modeSince;
+    final cur = modeCode;
+    if (since != null && cur != null) {
+      stats[cur]?.seconds += DateTime.now().difference(since).inSeconds;
+    }
+  }
+
+  void _setMode(int code) {
+    if (code == modeCode) return;
+    _closeSegment();
+    // The first mode seen after connecting is a starting point, not a switch.
+    if (modeCode != null) stats[code]?.count++;
+    modeCode = code;
+    _modeSince = DateTime.now();
+    _save();
+  }
+
+  void _endMode() {
+    _closeSegment();
+    modeCode = null;
+    _modeSince = null;
+    _save();
+  }
+
+  void _save() {
+    _prefs?.setString(
+      'stats',
+      jsonEncode({
+        for (final e in stats.entries) '${e.key}': [e.value.count, e.value.seconds],
+      }),
+    );
+  }
+}
